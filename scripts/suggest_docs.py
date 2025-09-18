@@ -195,6 +195,8 @@ CRITICAL FORMATTING REQUIREMENTS FOR MARKDOWN FILES:
 - NEVER use markdown code fences like ```markdown or ``` to wrap the entire file content
 - Markdown files start directly with content (comments, headers, or text)
 - Use standard Markdown syntax: # for headers, ``` for code blocks, | for tables
+- Table separators must be simple: |---|---|---| (no backslashes, no extra characters)
+- Do NOT add extra ``` backticks at the end of the file
 - Maintain proper table structures with correct column alignment
 - Keep all links and references intact and properly formatted
 - Use consistent indentation and spacing

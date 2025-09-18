@@ -1,4 +1,3 @@
-```markdown
 # Metrics
 
 Tekton Chains exposes standard
@@ -27,6 +26,9 @@ The following chains metrics are also available at `tekton-chains-metrics` servi
 | `watcher_taskrun_marked_signed_total` | Counter | Total number of objects marked as signed for taskruns |
 | `pipelinerun_error_count` | Counter | Number of errors encountered during pipeline run processing |
 | `pipelinerun_process_duration_seconds` | Distribution | Time taken to process pipeline runs in seconds |
+| `pipelinerun_retry_count` | Counter | Number of retries attempted for failed pipeline runs |
+| `pipelinerun_queue_depth` | Gauge | Current number of pipeline runs waiting in queue |
+| `pipelinerun_attestation_generated_total` | Counter | Total number of attestations generated for pipeline runs |
 
 To access the chains metrics, use the following commands:
 ```shell
@@ -34,6 +36,5 @@ kubectl port-forward -n tekton-chains service/tekton-chains-metrics 9090
 ```
 
 And then check that changes have been applied to metrics coming from [http://127.0.0.1:9090/metrics](http://127.0.0.1:9090/metrics)
-```
 ```
 ```

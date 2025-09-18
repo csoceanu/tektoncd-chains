@@ -67,11 +67,63 @@ var (
 		stats.UnitSeconds)
 
 	processTimeDurationView *view.View
+
+	// Retry and failure metrics for reliability monitoring
+	retryCount = stats.Float64("pipelinerun_retry_count",
+		"Number of retries attempted for failed pipeline runs",
+		stats.UnitDimensionless)
+
+	retryCountView *view.View
+
+	// Queue depth metrics for throughput monitoring
+	queueDepth = stats.Float64("pipelinerun_queue_depth",
+		"Current number of pipeline runs waiting in queue",
+		stats.UnitDimensionless)
+
+	queueDepthView *view.View
+
+	// Attestation generation metrics
+	attestationGeneratedCount = stats.Float64("pipelinerun_attestation_generated_total",
+		"Total number of attestations generated for pipeline runs",
+		stats.UnitDimensionless)
+
+	attestationGeneratedCountView *view.View
 )
+
+// Metric recording constants for different operation types
+const (
+	// Retry operation types
+	RetryTypePipelineExecution = "pipeline_execution"
+	RetryTypeSignatureGeneration = "signature_generation"
+	RetryTypeAttestationUpload = "attestation_upload"
+	
+	// Queue depth measurement intervals (in seconds)
+	QueueDepthMeasurementInterval = 30
+	
+	// Maximum recommended queue depth before alerting
+	MaxRecommendedQueueDepth = 100
+)
+
+// MetricsConfig holds configuration for metrics collection
+type MetricsConfig struct {
+	EnableDetailedMetrics bool
+	MeasurementInterval   int
+	MaxQueueDepth        int
+}
+
+// DefaultMetricsConfig returns the default configuration for metrics
+func DefaultMetricsConfig() *MetricsConfig {
+	return &MetricsConfig{
+		EnableDetailedMetrics: true,
+		MeasurementInterval:   QueueDepthMeasurementInterval,
+		MaxQueueDepth:        MaxRecommendedQueueDepth,
+	}
+}
 
 // Recorder holds keys for Tekton metrics
 type Recorder struct {
 	initialized bool
+	config      *MetricsConfig
 }
 
 // We cannot register the view multiple times, so NewRecorder lazily
@@ -90,6 +142,7 @@ func NewRecorder(ctx context.Context) (*Recorder, error) {
 	once.Do(func() {
 		r = &Recorder{
 			initialized: true,
+			config:      DefaultMetricsConfig(),
 		}
 		errRegistering = viewRegister()
 		if errRegistering != nil {
@@ -97,6 +150,9 @@ func NewRecorder(ctx context.Context) (*Recorder, error) {
 			logger.Errorf("View Register Failed ", r.initialized)
 			return
 		}
+		
+		logger.Debugf("Initialized metrics recorder with config: detailed=%v, interval=%d", 
+			r.config.EnableDetailedMetrics, r.config.MeasurementInterval)
 	})
 
 	return r, errRegistering
@@ -139,6 +195,24 @@ func viewRegister() error {
 		Aggregation: view.Distribution(0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0),
 	}
 
+	retryCountView = &view.View{
+		Description: retryCount.Description(),
+		Measure:     retryCount,
+		Aggregation: view.Count(),
+	}
+
+	queueDepthView = &view.View{
+		Description: queueDepth.Description(),
+		Measure:     queueDepth,
+		Aggregation: view.LastValue(),
+	}
+
+	attestationGeneratedCountView = &view.View{
+		Description: attestationGeneratedCount.Description(),
+		Measure:     attestationGeneratedCount,
+		Aggregation: view.Count(),
+	}
+
 	return view.Register(
 		sgCountView,
 		plCountView,
@@ -146,6 +220,9 @@ func viewRegister() error {
 		mrCountView,
 		errorCountView,
 		processTimeDurationView,
+		retryCountView,
+		queueDepthView,
+		attestationGeneratedCountView,
 	)
 }
 
@@ -225,6 +302,9 @@ func (r *Recorder) GetMetricsStatus(ctx context.Context) map[string]interface{} 
 		mrCountView.Name,
 		errorCountView.Name,
 		processTimeDurationView.Name,
+		retryCountView.Name,
+		queueDepthView.Name,
+		attestationGeneratedCountView.Name,
 	}
 	
 	status["available_views"] = availableViews
@@ -261,6 +341,16 @@ func (r *Recorder) RecordBatchMetrics(ctx context.Context, operations []MetricOp
 				continue
 			}
 			r.RecordDurationMetrics(ctx, op.Value)
+		case "retry":
+			r.RecordRetryMetrics(ctx, op.MetricType)
+		case "queue":
+			if op.Value < 0 {
+				logger.Errorf("Invalid queue depth for operation %d: %f", i, op.Value)
+				continue
+			}
+			r.RecordQueueDepthMetrics(ctx, op.Value)
+		case "attestation":
+			r.RecordAttestationGeneratedMetrics(ctx)
 		default:
 			logger.Errorf("Unknown metric operation type: %s", op.Type)
 		}
@@ -270,9 +360,82 @@ func (r *Recorder) RecordBatchMetrics(ctx context.Context, operations []MetricOp
 	return nil
 }
 
+// RecordRetryMetrics records retry attempts for different operation types
+func (r *Recorder) RecordRetryMetrics(ctx context.Context, retryType string) {
+	logger := logging.FromContext(ctx)
+	if !r.initialized {
+		logger.Errorf("Ignoring retry metrics recording as recorder not initialized")
+		return
+	}
+	
+	// Validate retry type
+	validTypes := []string{RetryTypePipelineExecution, RetryTypeSignatureGeneration, RetryTypeAttestationUpload}
+	isValid := false
+	for _, validType := range validTypes {
+		if retryType == validType {
+			isValid = true
+			break
+		}
+	}
+	
+	if !isValid {
+		logger.Warnf("Unknown retry type: %s, recording anyway", retryType)
+	}
+	
+	metrics.Record(ctx, retryCount.M(1))
+	logger.Debugf("Recorded retry metric for type: %s", retryType)
+}
+
+// RecordQueueDepthMetrics records the current queue depth for monitoring throughput
+func (r *Recorder) RecordQueueDepthMetrics(ctx context.Context, currentDepth float64) {
+	logger := logging.FromContext(ctx)
+	if !r.initialized {
+		logger.Errorf("Ignoring queue depth metrics recording as recorder not initialized")
+		return
+	}
+	
+	if currentDepth < 0 {
+		logger.Errorf("Invalid queue depth: %f, must be non-negative", currentDepth)
+		return
+	}
+	
+	// Alert if queue depth exceeds recommended maximum
+	if r.config != nil && currentDepth > float64(r.config.MaxQueueDepth) {
+		logger.Warnf("Queue depth (%f) exceeds recommended maximum (%d)", currentDepth, r.config.MaxQueueDepth)
+	}
+	
+	metrics.Record(ctx, queueDepth.M(currentDepth))
+	logger.Debugf("Recorded queue depth: %f", currentDepth)
+}
+
+// RecordAttestationGeneratedMetrics records successful attestation generation
+func (r *Recorder) RecordAttestationGeneratedMetrics(ctx context.Context) {
+	logger := logging.FromContext(ctx)
+	if !r.initialized {
+		logger.Errorf("Ignoring attestation metrics recording as recorder not initialized")
+		return
+	}
+	
+	metrics.Record(ctx, attestationGeneratedCount.M(1))
+	logger.Debugf("Recorded attestation generation metric")
+}
+
+// UpdateMetricsConfig updates the recorder's configuration
+func (r *Recorder) UpdateMetricsConfig(ctx context.Context, config *MetricsConfig) {
+	logger := logging.FromContext(ctx)
+	if config == nil {
+		logger.Warn("Attempted to update with nil config, using default")
+		config = DefaultMetricsConfig()
+	}
+	
+	r.config = config
+	logger.Debugf("Updated metrics config: detailed=%v, interval=%d, maxQueue=%d", 
+		config.EnableDetailedMetrics, config.MeasurementInterval, config.MaxQueueDepth)
+}
+
 // MetricOperation represents a single metrics operation for batch processing
 type MetricOperation struct {
-	Type       string  // "count", "error", or "duration"
+	Type       string  // "count", "error", "duration", "retry", "queue", "attestation"
 	MetricType string  // specific metric type identifier
-	Value      float64 // value for duration metrics (ignored for count/error)
+	Value      float64 // value for duration/queue metrics (ignored for count/error/retry/attestation)
 }

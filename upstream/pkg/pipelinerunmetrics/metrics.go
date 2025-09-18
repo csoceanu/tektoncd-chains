@@ -18,7 +18,9 @@ package pipelinerunmetrics
 
 import (
 	"context"
+	"fmt"
 	"sync"
+	"time"
 
 	"github.com/tektoncd/chains/pkg/chains"
 	"go.opencensus.io/stats"
@@ -51,6 +53,20 @@ var (
 		stats.UnitDimensionless)
 
 	mrCountView *view.View
+
+	// New error metrics for better observability
+	errorCount = stats.Float64("pipelinerun_error_count",
+		"Number of errors encountered during pipeline run processing",
+		stats.UnitDimensionless)
+
+	errorCountView *view.View
+
+	// Duration metrics for performance monitoring
+	processTimeDuration = stats.Float64("pipelinerun_process_duration_seconds",
+		"Time taken to process pipeline runs in seconds",
+		stats.UnitSeconds)
+
+	processTimeDurationView *view.View
 )
 
 // Recorder holds keys for Tekton metrics
@@ -110,11 +126,26 @@ func viewRegister() error {
 		Measure:     mrCount,
 		Aggregation: view.Count(),
 	}
+
+	errorCountView = &view.View{
+		Description: errorCount.Description(),
+		Measure:     errorCount,
+		Aggregation: view.Count(),
+	}
+
+	processTimeDurationView = &view.View{
+		Description: processTimeDuration.Description(),
+		Measure:     processTimeDuration,
+		Aggregation: view.Distribution(0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0),
+	}
+
 	return view.Register(
 		sgCountView,
 		plCountView,
 		stCountView,
 		mrCountView,
+		errorCountView,
+		processTimeDurationView,
 	)
 }
 
@@ -141,4 +172,107 @@ func (r *Recorder) RecordCountMetrics(ctx context.Context, metricType string) {
 
 func (r *Recorder) countMetrics(ctx context.Context, measure *stats.Float64Measure) {
 	metrics.Record(ctx, measure.M(1))
+}
+
+// RecordErrorMetrics records error occurrences with optional error type classification
+func (r *Recorder) RecordErrorMetrics(ctx context.Context, errorType string) {
+	logger := logging.FromContext(ctx)
+	if !r.initialized {
+		logger.Errorf("Ignoring the error metrics recording as recorder not initialized")
+		return
+	}
+	// Record error count with optional tags for error classification
+	metrics.Record(ctx, errorCount.M(1))
+	logger.Debugf("Recorded error metric for type: %s", errorType)
+}
+
+// RecordDurationMetrics records the time taken for pipeline processing
+func (r *Recorder) RecordDurationMetrics(ctx context.Context, durationSeconds float64) {
+	logger := logging.FromContext(ctx)
+	if !r.initialized {
+		logger.Errorf("Ignoring the duration metrics recording as recorder not initialized")
+		return
+	}
+	if durationSeconds < 0 {
+		logger.Errorf("Invalid duration provided: %f seconds, must be non-negative", durationSeconds)
+		return
+	}
+	metrics.Record(ctx, processTimeDuration.M(durationSeconds))
+	logger.Debugf("Recorded processing duration: %f seconds", durationSeconds)
+}
+
+// GetMetricsStatus returns a summary of the current metrics configuration
+// This is useful for debugging and monitoring the health of metrics collection
+func (r *Recorder) GetMetricsStatus(ctx context.Context) map[string]interface{} {
+	logger := logging.FromContext(ctx)
+	
+	status := map[string]interface{}{
+		"initialized": r.initialized,
+		"timestamp":   time.Now().Format(time.RFC3339),
+	}
+	
+	if !r.initialized {
+		logger.Warn("Metrics recorder not properly initialized")
+		status["error"] = "recorder not initialized"
+		return status
+	}
+	
+	// List all available metrics views
+	availableViews := []string{
+		sgCountView.Name,
+		plCountView.Name,
+		stCountView.Name,
+		mrCountView.Name,
+		errorCountView.Name,
+		processTimeDurationView.Name,
+	}
+	
+	status["available_views"] = availableViews
+	status["total_views"] = len(availableViews)
+	
+	logger.Debugf("Metrics status: %d views available, initialized: %v", len(availableViews), r.initialized)
+	
+	return status
+}
+
+// RecordBatchMetrics allows recording multiple metrics in a single operation
+// This is more efficient when multiple metrics need to be updated simultaneously
+func (r *Recorder) RecordBatchMetrics(ctx context.Context, operations []MetricOperation) error {
+	logger := logging.FromContext(ctx)
+	
+	if !r.initialized {
+		return fmt.Errorf("metrics recorder not initialized")
+	}
+	
+	if len(operations) == 0 {
+		logger.Warn("No metric operations provided for batch recording")
+		return nil
+	}
+	
+	for i, op := range operations {
+		switch op.Type {
+		case "count":
+			r.RecordCountMetrics(ctx, op.MetricType)
+		case "error":
+			r.RecordErrorMetrics(ctx, op.MetricType)
+		case "duration":
+			if op.Value <= 0 {
+				logger.Errorf("Invalid duration value for operation %d: %f", i, op.Value)
+				continue
+			}
+			r.RecordDurationMetrics(ctx, op.Value)
+		default:
+			logger.Errorf("Unknown metric operation type: %s", op.Type)
+		}
+	}
+	
+	logger.Debugf("Successfully processed %d metric operations", len(operations))
+	return nil
+}
+
+// MetricOperation represents a single metrics operation for batch processing
+type MetricOperation struct {
+	Type       string  // "count", "error", or "duration"
+	MetricType string  // specific metric type identifier
+	Value      float64 // value for duration metrics (ignored for count/error)
 }

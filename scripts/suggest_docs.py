@@ -192,6 +192,8 @@ def ask_gemini_for_updated_content(diff, file_path, current_content):
     if is_markdown:
         format_instructions = """
 CRITICAL FORMATTING REQUIREMENTS FOR MARKDOWN FILES:
+- NEVER use markdown code fences like ```markdown or ``` to wrap the entire file content
+- Markdown files start directly with content (comments, headers, or text)
 - Use standard Markdown syntax: # for headers, ``` for code blocks, | for tables
 - Maintain proper table structures with correct column alignment
 - Keep all links and references intact and properly formatted
